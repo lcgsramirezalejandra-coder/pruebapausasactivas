@@ -6,14 +6,13 @@ let player;
 let isYoutubeApiLoaded = false;
 let youtubePlayerPromise = null;
 let userInteracted = false;
-
-// NUEVO: Registro para bloquear contenidos mientras se reproducen
-let contentLocks = {}; 
+let contentLocks = {};
 
 // Detectar si estamos en una TV o dispositivo móvil
 const isMobileOrTV = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|SmartTV|TV|Xbox|PlayStation|Nintendo|Apple TV|Samsung TV/i.test(navigator.userAgent);
 console.log(`Dispositivo detectado: ${isMobileOrTV ? 'Móvil/TV' : 'Computadora'}`);
 
+// Esta función es llamada automáticamente por la API de YouTube
 function onYouTubeIframeAPIReady() {
   console.log("API de YouTube lista.");
   isYoutubeApiLoaded = true;
@@ -26,7 +25,6 @@ function loadYoutubeApi() {
   if (!isYoutubeApiLoaded && !document.getElementById('youtube-api-script')) {
     const tag = document.createElement('script');
     tag.id = 'youtube-api-script';
-    // ✅ CORREGIDO: Sin espacios al final
     tag.src = "https://www.youtube.com/iframe_api";
     document.head.appendChild(tag);
     youtubePlayerPromise = new Promise((resolve) => {
@@ -116,7 +114,6 @@ function showBirthdayMessage(nombre, duracion) {
 // ============================================
 async function playYoutubeVideo(videoId, duracion) {
   const muted = isMobileOrTV ? true : !userInteracted;
-  // ✅ CORREGIDO: contentId consistente con checkEstado + trim para eliminar espacios
   const cleanVideoId = videoId.trim();
   const contentId = `video_${cleanVideoId}`;
   
@@ -137,7 +134,6 @@ async function playYoutubeVideo(videoId, duracion) {
       await loadYoutubeApi();
       
       player = new YT.Player('youtube-player', {
-        // ✅ CORREGIDO: Sin espacios al final
         host: 'https://www.youtube-nocookie.com',
         height: '100%',
         width: '100%',
@@ -185,7 +181,9 @@ async function playYoutubeVideo(videoId, duracion) {
   }, duracion);
 }
 
-// ✅ NUEVA: Función para limpiar datos JSON (trim recursivo)
+// ============================================
+// NUEVA: Función para limpiar datos JSON (trim recursivo)
+// ============================================
 function limpiarDatos(obj) {
   if (typeof obj === 'string') return obj.trim();
   if (Array.isArray(obj)) return obj.map(limpiarDatos);
@@ -197,6 +195,86 @@ function limpiarDatos(obj) {
     return limpio;
   }
   return obj;
+}
+
+// ============================================
+// NUEVA: Función para encontrar próximo contenido (pre-carga)
+// ============================================
+function getProximoContenido(anuncios, pausas, currentMinutes, ventanaMinutos = 20) {
+  const proximos = [];
+  
+  for (const item of anuncios) {
+    const [h, m] = item.hora_inicio.trim().split(':').map(Number);
+    const startMin = h * 60 + m;
+    const diff = startMin - currentMinutes;
+    const diffAjustado = diff < 0 ? diff + 1440 : diff;
+    
+    if (diffAjustado > 0 && diffAjustado <= ventanaMinutos) {
+      proximos.push({ ...item, tipo: 'video', startMin, diff: diffAjustado });
+    }
+  }
+  
+  for (const grupo of Object.values(pausas)) {
+    const items = Array.isArray(grupo) ? grupo : [grupo];
+    for (const item of items) {
+      const [h, m] = item.hora_inicio.trim().split(':').map(Number);
+      const startMin = h * 60 + m;
+      const diff = startMin - currentMinutes;
+      const diffAjustado = diff < 0 ? diff + 1440 : diff;
+      
+      if (diffAjustado > 0 && diffAjustado <= ventanaMinutos) {
+        proximos.push({ ...item, tipo: 'video', startMin, diff: diffAjustado });
+      }
+    }
+  }
+  
+  proximos.sort((a, b) => a.diff - b.diff);
+  return proximos[0] || null;
+}
+
+// ============================================
+// NUEVA: Función de pre-carga para sincronización de TVs
+// ============================================
+async function preLoadVideo(videoId) {
+  const cleanId = videoId.trim();
+  console.log(`🔄 Pre-cargando video: ${cleanId}`);
+  
+  await loadYoutubeApi();
+  
+  let preloadDiv = document.getElementById('youtube-preload-container');
+  if (!preloadDiv) {
+    preloadDiv = document.createElement('div');
+    preloadDiv.id = 'youtube-preload-container';
+    preloadDiv.style.cssText = 'position:absolute; left:-9999px; width:1px; height:1px; overflow:hidden;';
+    document.body.appendChild(preloadDiv);
+  }
+  
+  const playerId = `preload-${cleanId}`;
+  preloadDiv.innerHTML = `<div id="${playerId}"></div>`;
+  
+  return new Promise((resolve) => {
+    const preloadPlayer = new YT.Player(playerId, {
+      host: 'https://www.youtube-nocookie.com',
+      height: '1', width: '1', videoId: cleanId,
+      playerVars: { 
+        'autoplay': 0, 
+        'controls': 0, 
+        'mute': 1,
+        'playsinline': 1 
+      },
+      events: {
+        'onReady': (e) => {
+          e.target.cueVideoById(cleanId);
+          console.log(`✅ Video pre-cargado: ${cleanId}`);
+          resolve();
+        },
+        'onError': (e) => {
+          console.warn(`⚠️ No se pudo pre-cargar: ${cleanId}`);
+          resolve();
+        }
+      }
+    });
+  });
 }
 
 // ============================================
@@ -217,7 +295,7 @@ async function checkEstado() {
       throw new Error(`Error HTTP: ${cumpleResponse.status}, ${horarioResponse.status}`);
     }
 
-    // ✅ CORREGIDO: Limpiar datos al cargar (elimina espacios de JSON)
+    // ✅ LIMPIAR los datos al cargar (elimina espacios de JSON)
     const cumpleanosData = limpiarDatos(await cumpleResponse.json());
     const horariosData = limpiarDatos(await horarioResponse.json());
     const cumpleanosArray = Array.isArray(cumpleanosData) ? cumpleanosData : [cumpleanosData];
@@ -235,6 +313,13 @@ async function checkEstado() {
     const currentHour = now.getHours();
     const currentMinute = now.getMinutes();
     const currentTime = currentHour * 60 + currentMinute;
+
+    // === PRE-CARGA: Buscar próximo video para sincronización ===
+    const proximo = getProximoContenido(anunciosVideo, pausasActivas, currentTime);
+    if (proximo && proximo.diff <= 15) {
+      console.log(`⏱️ Pre-carga: ${proximo.diff}s para ${proximo.archivo}`);
+      preLoadVideo(proximo.archivo);
+    }
 
     let activeContent = null;
 
@@ -312,7 +397,7 @@ async function checkEstado() {
       if (activeContent.tipo === "cumpleanos") {
         contentId = `cumpleanos_${activeContent.nombre}_${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
       } else {
-        // ✅ CORREGIDO: Mismo formato que playYoutubeVideo: "video_ID"
+        // ✅ CONSISTENTE con playYoutubeVideo: "video_ID"
         contentId = `video_${activeContent.archivo}`;
       }
 
@@ -326,7 +411,6 @@ async function checkEstado() {
         if (activeContent.tipo === "cumpleanos") {
           showBirthdayMessage(activeContent.nombre, activeContent.duracion);
         } else if (activeContent.archivo && /^[a-zA-Z0-9_-]{11}$/.test(activeContent.archivo.trim())) {
-          // ✅ CORREGIDO: .trim() en el regex para aceptar IDs con espacios
           playYoutubeVideo(activeContent.archivo, activeContent.duracion);
         }
       } else {
@@ -344,8 +428,10 @@ async function checkEstado() {
       if (overlay.style.display !== "none") {
         clearAll();
       }
+      // ✅ SOLO limpiar a medianoche
       if (now.getHours() === 0 && now.getMinutes() < 2) {
         playedFiles.clear();
+        console.log("🔄 playedFiles limpiado para nuevo día");
       }
     }
 
